@@ -16,7 +16,8 @@ O **TelaScore** é uma aplicação de avaliações de **filmes, séries e jogos*
 
 ## Banco de dados
 
-- **Banco:** MongoDB (orientado a documentos), hospedado no **MongoDB Atlas**.
+- **Banco principal:** MongoDB (orientado a documentos), hospedado no **MongoDB Atlas**.
+- **Cache e estatísticas:** Redis (em memória), hospedado no **Redis Cloud**.
 - **Nome do banco:** `telascore`
 
 ### Coleções
@@ -53,16 +54,29 @@ Pipeline: `$addFields` com `$dateSubtract` e `$$NOW` (início de cada período) 
 
 Foco: **análise temporal**, com datas calculadas a partir do momento da consulta e contagens condicionais.
 
+## Camada de cache e estatísticas (Redis)
+
+Além do MongoDB Atlas, o TelaScore usa o **Redis** (com as estruturas probabilísticas disponíveis no **Redis Cloud**) como camada em memória para login e métricas de uso, no script `scripts/05_redis_cache_estatisticas.js`:
+
+- **Bloom Filter de usuários (`bf:usuarios:emails`):** verifica de forma probabilística se um e-mail está cadastrado antes de consultar o MongoDB, evitando leituras desnecessárias.
+- **Cache de login e sessão (`cache:usuario:<email>` e `sessao:<token>`):** guarda os dados de login temporariamente (TTL de 15 minutos) e a sessão ativa (TTL de 1 hora), seguindo o padrão cache-aside.
+- **HyperLogLog (`hll:usuarios_ativos:hoje`):** conta os usuários únicos ativos no dia usando no máximo 12 KB de memória.
+- **Count-Min Sketch (`cms:titulos:visualizacoes`):** estima quantas vezes cada título foi visualizado.
+- **Bloom Filter de avaliações (`bf:avaliacoes:pares`):** faz uma pré-checagem rápida de avaliações duplicadas antes da validação final no MongoDB.
+
 ## Estrutura do repositório
 
 ```
 telascore/
 ├── README.md
+├── package.json             # dependências do Node.js (biblioteca redis)
+├── package-lock.json        # versões exatas instaladas (gerado pelo npm)
 └── scripts/
     ├── 01_criar_colecoes.js    # cria o banco, as coleções (com validação) e os índices
     ├── 02_inserir_exemplos.js  # insere documentos de exemplo e calcula a nota média
     ├── 03_ranking_por_tipo.js  # funcionalidade 1: ranking dos melhores títulos por tipo
-    └── 04_titulos_em_alta.js   # funcionalidade 2: títulos em alta nos últimos 30 dias
+    ├── 04_titulos_em_alta.js   # funcionalidade 2: títulos em alta nos últimos 30 dias
+    └── 05_redis_cache_estatisticas.js  # cache de login e estatísticas com Redis
 ```
 
 ## Como executar
@@ -83,3 +97,22 @@ mongosh "mongodb+srv://ENDERECO_DO_CLUSTER/" --apiVersion 1 --username SEU_USUAR
 > As datas das avaliações de exemplo são relativas ao dia da execução do script 02. Para os títulos em alta refletirem os dados de exemplo, execute o script 02 novamente antes do 04 se tiver passado muito tempo.
 
 Resultado esperado do script 02: 6 usuários, 9 títulos (3 filmes, 3 séries e 3 jogos) e 30 avaliações, com a nota média de cada título calculada.
+
+### Como executar o script do Redis
+
+Pré-requisitos: [Node.js](https://nodejs.org/) instalado e um banco gratuito no **Redis Cloud**.
+
+1. Na pasta do projeto, instale as dependências:
+   ```
+   npm install
+   ```
+2. Defina a URL de conexão do Redis como variável de ambiente (no PowerShell). A senha **nunca** deve ser escrita no código nem enviada ao repositório:
+   ```
+   $env:REDIS_URI = "redis://default:SUA_SENHA@ENDERECO_DO_REDIS:PORTA"
+   ```
+3. Execute o script:
+   ```
+   node scripts/05_redis_cache_estatisticas.js
+   ```
+
+Resultado esperado: o Bloom Filter identifica o e-mail cadastrado e recusa o inexistente, o cache de login e a sessão aparecem com o tempo restante (TTL), o HyperLogLog estima 6 usuários únicos, o Count-Min Sketch mostra as visualizações por título e o Bloom Filter de avaliações aponta a avaliação duplicada.
