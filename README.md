@@ -10,6 +10,15 @@ Exemplo de como o usuário vê um título no TelaScore: nome, gênero, ano, nota
 
 ![Visão do usuário no TelaScore](docs/visao-usuario.png)
 
+## Evidências
+
+| Evidência | Onde está neste README | Arquivo |
+|---|---|---|
+| Visão do usuário | [Visão do usuário](#visão-do-usuário) | `docs/visao-usuario.png` |
+| Ranking por tipo no Atlas | [Funcionalidade 1](#1-ranking-dos-melhores-títulos-por-tipo-03_ranking_por_tipojs) | `docs/atlas-ranking-pipeline.png` e `docs/atlas-ranking-resultado.png` |
+| Títulos em alta no Atlas | [Funcionalidade 2](#2-títulos-em-alta-04_titulos_em_altajs) | `docs/atlas-em-alta-pipeline.png` e `docs/atlas-em-alta-resultado.png` |
+| Execução do script do Redis | [Evidência de execução do Redis](#evidência-de-execução-do-redis) | `docs/redis-resultado.png` |
+
 ## Descrição do sistema
 
 O **TelaScore** é uma aplicação de avaliações de **filmes, séries e jogos**. Qualquer usuário pode dar uma nota de 1 a 5 e escrever um comentário sobre um título. O sistema calcula a nota média e exibe as avaliações de cada título.
@@ -83,6 +92,18 @@ Roda na coleção `titulos`, usando a nota média e o total de avaliações já 
 
 Pipeline: `$match` (mínimo de avaliações) → `$sort` (maior nota) → `$group` (agrupa por tipo com `$push`) → `$project` com `$slice` (primeiros colocados) → `$sort`.
 
+**Resultado esperado:** filme: A Odisseia (4,6 · 5 avaliações) e Duna: Parte Dois (4,5 · 4); jogo: The Legend of Zelda: Tears of the Kingdom (4,8 · 4) e Minecraft (3,7 · 3); série: Ruptura (4,8 · 4), Dark (4,7 · 3) e O Urso (3,7 · 3).
+
+**Evidência no MongoDB Atlas (aba Aggregations da coleção `titulos`):**
+
+Pipeline com os 5 estágios:
+
+![Pipeline do ranking por tipo no Atlas](docs/atlas-ranking-pipeline.png)
+
+Resultado (primeiro grupo expandido):
+
+![Resultado do ranking por tipo no Atlas](docs/atlas-ranking-resultado.png)
+
 ### 2. Títulos em alta (`04_titulos_em_alta.js`)
 
 Lista os títulos mais avaliados nos últimos 30 dias e compara com os 30 dias anteriores, indicando se estão subindo, caindo ou estáveis, além da nota média recente.
@@ -91,17 +112,70 @@ Roda na coleção `titulos`, "abrindo" a lista de avaliações de cada título.
 
 Pipeline: `$match` com `$max` (descarta títulos sem avaliações recentes) → `$unwind` (um documento por avaliação) → `$addFields` com `$dateSubtract` e `$$NOW` (início de cada período) → `$match` com `$expr` (últimos 60 dias) → `$addFields` com `$cond` (período atual ou anterior) → `$group` com `$first` e somas condicionais → `$match` → `$project` com `$subtract` e `$switch` (variação e tendência) → `$sort` → `$limit`.
 
+**Resultado esperado** (com os dados de exemplo): A Odisseia (5 avaliações recentes, *subindo*), Ruptura (4, *subindo*), The Legend of Zelda: Tears of the Kingdom (4, *subindo*), Hollow Knight (1, *estável*) e Minecraft (1, *caindo*).
+
+**Evidência no MongoDB Atlas (aba Aggregations da coleção `titulos`):**
+
+Pipeline com os 10 estágios:
+
+![Pipeline dos títulos em alta no Atlas](docs/atlas-em-alta-pipeline.png)
+
+Resultado (primeiros documentos):
+
+![Resultado dos títulos em alta no Atlas](docs/atlas-em-alta-resultado.png)
+
 As duas funcionalidades são diferentes: o ranking trabalha com a **qualidade acumulada** de cada título, sem abrir as avaliações; o "em alta" **abre a lista de avaliações** e analisa o **movimento no tempo**.
 
 ## Camada de cache e estatísticas (Redis)
 
-Além do MongoDB Atlas, o TelaScore usa o **Redis** (com as estruturas probabilísticas disponíveis no **Redis Cloud**) como camada em memória para login e métricas de uso, no script `scripts/05_redis_cache_estatisticas.js`:
+Além do MongoDB Atlas, o TelaScore usa o **Redis**, hospedado no **Redis Cloud**, como camada em memória para login e estatísticas de uso. O código está em `scripts/05_redis_cache_estatisticas.js`.
 
-- **Bloom Filter de usuários (`bf:usuarios:emails`):** verifica de forma probabilística se um e-mail está cadastrado antes de consultar o MongoDB, evitando leituras desnecessárias.
-- **Cache de login e sessão (`cache:usuario:<email>` e `sessao:<token>`):** guarda os dados de login temporariamente (TTL de 15 minutos) e a sessão ativa (TTL de 1 hora), seguindo o padrão cache-aside.
-- **HyperLogLog (`hll:usuarios_ativos:hoje`):** conta os usuários únicos ativos no dia usando no máximo 12 KB de memória.
-- **Count-Min Sketch (`cms:titulos:visualizacoes`):** estima quantas vezes cada título foi visualizado.
-- **Bloom Filter de avaliações (`bf:avaliacoes:pares`):** faz uma pré-checagem rápida de avaliações duplicadas antes da validação final no MongoDB.
+O Redis é um banco **chave-valor** que guarda os dados na memória RAM, por isso responde em menos de 1 milissegundo. Cada banco cuida do que faz melhor (**persistência poliglota**): o MongoDB guarda os dados permanentes e é a **fonte da verdade**; o Redis guarda dados temporários e métricas que precisam de velocidade.
+
+### Cache de login e sessão
+
+| Chave | Conteúdo | Tempo de vida (TTL) |
+|---|---|---|
+| `cache:usuario:<email>` | Dados de login (apelido e hash da senha) | 15 minutos |
+| `sessao:<token>` | Usuário dono da sessão ativa | 1 hora |
+
+- **TTL (*Time To Live*):** tempo de vida da chave. Quando acaba, o Redis apaga a chave sozinho; é assim que a sessão expira.
+- **Padrão *cache-aside*:** o sistema procura primeiro no Redis; se não encontrar (*cache miss*), busca no MongoDB e guarda uma cópia no Redis com TTL.
+- **Comandos usados:** `hSet` (guarda um objeto com vários campos), `hGetAll` (lê o objeto), `expire` (define o TTL), `ttl` (mostra o tempo restante) e `del` (apaga a chave).
+
+### Estruturas probabilísticas
+
+Estruturas probabilísticas trocam **exatidão** por uma **economia muito grande de memória e velocidade**: em vez de guardar os dados, guardam um resumo matemático deles. Por isso podem errar, mas de forma previsível e controlada.
+
+| Estrutura | Chave | Pergunta que responde | Como funciona | Erro possível |
+|---|---|---|---|---|
+| **Bloom Filter** | `bf:usuarios:emails` e `bf:avaliacoes:pares` | "Esse item já existe?" | Cada item marca algumas posições de uma sequência de bits (definidas por funções de *hash*). Se alguma posição do item consultado estiver desmarcada, ele nunca foi adicionado. | **Falso positivo** ("talvez exista" para um item que não existe). **Nunca há falso negativo.** Configurado com 0,1% de chance de erro para até 10 mil itens. |
+| **HyperLogLog** | `hll:usuarios_ativos:hoje` | "Quantos itens diferentes?" | Analisa padrões raros nos valores de *hash* dos itens para estimar quantos são distintos. Repetições não contam duas vezes. Usa no máximo 12 KB. | Erro de cerca de **0,81%** para mais ou para menos. |
+| **Count-Min Sketch** | `cms:titulos:visualizacoes` | "Quantas vezes cada item apareceu?" | Tabela de contadores (2.000 colunas × 5 linhas). Cada visualização soma 1 em um contador por linha; a consulta pega o **menor** desses contadores. | Pode **superestimar** quando itens diferentes caem no mesmo contador. **Nunca subestima.** |
+
+Comandos usados: `bf.reserve`, `bf.add` e `bf.exists` (Bloom Filter); `pfAdd` e `pfCount` (HyperLogLog); `cms.initByDim`, `cms.incrBy` e `cms.query` (Count-Min Sketch).
+
+### O que acontece quando a estrutura probabilística responde errado?
+
+As estruturas probabilísticas são usadas como **filtro rápido** ou **métrica aproximada**, nunca como decisão final quando a exatidão importa. Quando há dúvida, o sistema consulta o MongoDB. Os erros possíveis foram escolhidos para cair sempre **para o lado seguro**:
+
+| Estrutura | Erro | O que o sistema faz | Impacto |
+|---|---|---|---|
+| Bloom Filter de e-mails | Diz "talvez exista" para um e-mail não cadastrado | Consulta o MongoDB, que responde "não encontrado", e o login falha normalmente | Apenas uma consulta a mais ao MongoDB |
+| Bloom Filter de e-mails | Falso negativo | Não acontece: um usuário cadastrado nunca é barrado pelo filtro | Nenhum |
+| Bloom Filter de avaliações | Diz "talvez já avaliou" para quem nunca avaliou o título | Não bloqueia: confirma no MongoDB. A decisão final é do comando de inserção, que só grava se o usuário ainda não avaliou (`$ne`) | Apenas uma verificação a mais; o usuário consegue avaliar |
+| HyperLogLog | Estima, por exemplo, 1.008 usuários ativos quando foram 1.000 | Nada: o valor só é exibido em estatísticas | Métrica levemente imprecisa, sem efeito em decisões |
+| Count-Min Sketch | Mostra um título com mais visualizações do que teve | Nada: o valor só indica popularidade | Um título pode parecer um pouco mais popular; o erro é limitado pelo tamanho da tabela |
+
+Situações equivalentes no **cache de login** (que não é probabilístico):
+
+- **Chave expirada ou inexistente:** *cache miss*; o sistema busca no MongoDB.
+- **Dado desatualizado:** quando o usuário troca a senha, a chave do cache é apagada (`del`), para o hash antigo não continuar sendo usado.
+- **Redis fora do ar ou reiniciado:** o sistema consulta direto o MongoDB (mais lento, mas correto), e os Bloom Filters são reconstruídos a partir dos dados do MongoDB.
+
+Estruturas probabilísticas **não são usadas** onde a exatidão é obrigatória, como a contagem oficial de avaliações, a nota média ou o controle de acesso; esses dados vêm do MongoDB.
+
+> O script `05_redis_cache_estatisticas.js` demonstra cada estrutura isoladamente. O fluxo de confirmação no MongoDB descrito acima é o comportamento previsto para o sistema completo.
 
 ## Estrutura do repositório
 
@@ -109,7 +183,12 @@ Além do MongoDB Atlas, o TelaScore usa o **Redis** (com as estruturas probabil�
 telascore/
 ├── README.md
 ├── docs/
-│   └── visao-usuario.png    # visão do usuário (imagem usada neste README)
+│   ├── visao-usuario.png              # visão do usuário
+│   ├── atlas-ranking-pipeline.png     # evidência: pipeline do ranking no Atlas
+│   ├── atlas-ranking-resultado.png    # evidência: resultado do ranking no Atlas
+│   ├── atlas-em-alta-pipeline.png     # evidência: pipeline dos títulos em alta no Atlas
+│   ├── atlas-em-alta-resultado.png    # evidência: resultado dos títulos em alta no Atlas
+│   └── redis-resultado.png            # evidência: execução do script do Redis
 ├── package.json             # dependências do Node.js (biblioteca redis)
 ├── package-lock.json        # versões exatas instaladas (gerado pelo npm)
 └── scripts/
@@ -157,3 +236,9 @@ Pré-requisitos: [Node.js](https://nodejs.org/) instalado e um banco gratuito no
    ```
 
 Resultado esperado: o Bloom Filter identifica o e-mail cadastrado e recusa o inexistente, o cache de login e a sessão aparecem com o tempo restante (TTL), o HyperLogLog estima 6 usuários únicos, o Count-Min Sketch mostra as visualizações por título e o Bloom Filter de avaliações aponta a avaliação duplicada.
+
+### Evidência de execução do Redis
+
+Execução do script no Redis Cloud, com todos os resultados esperados:
+
+![Resultado da execução do script do Redis](docs/redis-resultado.png)
