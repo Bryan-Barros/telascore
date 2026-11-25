@@ -28,19 +28,50 @@ O **TelaScore** é uma aplicação de avaliações de **filmes, séries e jogos*
 
 ### Coleções
 
+O banco tem **duas coleções**. As avaliações ficam **embutidas** dentro de cada título, em uma lista.
+
 | Coleção | Conteúdo | Principais campos |
 |---|---|---|
 | `usuarios` | Pessoas que fazem as avaliações | `apelido`, `email`, `senhaHash`, `criadoEm` |
-| `titulos` | Filmes, séries e jogos | `nome`, `tipo`, `genero`, `ano`, `notaMedia`, `totalAvaliacoes` |
-| `avaliacoes` | Notas e comentários | `tituloId`, `usuarioId`, `apelido`, `nota`, `comentario`, `data` |
+| `titulos` | Filmes, séries e jogos, cada um com suas avaliações | `nome`, `tipo`, `genero`, `ano`, `notaMedia`, `totalAvaliacoes`, `avaliacoes[]` |
+
+Cada item da lista `avaliacoes` tem: `usuarioId`, `apelido`, `nota`, `comentario` e `data`.
+
+Exemplo de documento da coleção `titulos` (resumido):
+
+```javascript
+{
+  _id: ObjectId("..."),
+  nome: "A Odisseia",
+  tipo: "filme",
+  genero: "Aventura",
+  ano: 2026,
+  notaMedia: 4.6,
+  totalAvaliacoes: 5,
+  avaliacoes: [
+    { usuarioId: ObjectId("..."), apelido: "cinefilo22", nota: 5, comentario: "Épico do começo ao fim.", data: ISODate("...") },
+    { usuarioId: ObjectId("..."), apelido: "maratonista", nota: 4, comentario: "Longo, mas vale a pena.", data: ISODate("...") }
+    // ...
+  ]
+}
+```
 
 ### Decisões de modelagem
 
-- **Referência em vez de documento embutido:** as avaliações ficam em uma coleção própria e apontam para o título e o usuário pelo `_id`, porque podem crescer sem limite (um documento no MongoDB tem limite de 16 MB).
-- **Desnormalização:** `notaMedia` e `totalAvaliacoes` ficam salvos no título para leitura rápida, e o `apelido` é copiado na avaliação para exibição sem consultar outra coleção.
-- **Validação de esquema (`$jsonSchema`):** campos obrigatórios, nota entre 1 e 5 e tipo restrito a `filme`, `serie` ou `jogo`.
-- **Índices:** e-mail e apelido únicos; índice único em `tituloId + usuarioId` (cada usuário avalia um título apenas uma vez); índice para ranking por tipo e nota.
+- **Avaliações embutidas no título:** a principal tela do sistema mostra um título com suas avaliações (ver *Visão do usuário*). Guardando tudo no mesmo documento, essa tela é lida em **uma única consulta**, seguindo a ideia de agregado: dados lidos juntos ficam juntos.
+- **Análise de `$lookup`:** na versão anterior, as avaliações ficavam em uma coleção separada e as duas funcionalidades da etapa 3 precisavam de `$lookup` (junção entre coleções) para buscar o nome e o tipo do título. Além disso, a avaliação repetia campos do título. Com as avaliações embutidas, **nenhuma consulta do sistema usa `$lookup`** e não há dados do título duplicados.
+- **Desnormalização:** `notaMedia` e `totalAvaliacoes` ficam salvos no título para leitura rápida (o ranking usa esses campos direto), e o `apelido` do usuário é copiado em cada avaliação para exibição sem consultar a coleção `usuarios`.
+- **Atualização atômica:** uma nova avaliação é adicionada à lista e a nota média é recalculada **no mesmo comando** (`updateOne` com pipeline), já que tudo está no mesmo documento.
+- **Uma avaliação por usuário em cada título:** garantida no próprio comando de inserção, que só altera o título se ainda não existir avaliação daquele usuário (`"avaliacoes.usuarioId": { $ne: usuarioId }`).
+- **Usuários em coleção separada:** o usuário existe independentemente dos títulos (faz login e avalia vários títulos), por isso não é embutido.
+- **Validação de esquema (`$jsonSchema`):** campos obrigatórios, nota entre 1 e 5, tipo restrito a `filme`, `serie` ou `jogo` e estrutura de cada avaliação da lista.
+- **Índices:** e-mail e apelido únicos em `usuarios`; em `titulos`, índice para ranking por tipo e nota, índice por nome e índice *multikey* em `avaliacoes.usuarioId` (encontra os títulos avaliados por um usuário).
 - **Proteção de dados (LGPD):** do usuário são armazenados apenas os dados necessários (apelido, e-mail e hash da senha). A senha nunca é guardada em texto puro. Os dados de exemplo são fictícios.
+
+### Limitações conhecidas
+
+- **Tamanho do documento:** um documento no MongoDB tem limite de 16 MB (cerca de 60 mil avaliações por título). Para a escala do TelaScore, isso é suficiente. Se um título passasse a receber avaliações em grande volume, a evolução seria manter só as avaliações mais recentes no título e as demais em outra coleção (padrão de subconjunto).
+- **Escritas simultâneas:** muitos usuários avaliando o mesmo título ao mesmo tempo atualizam o mesmo documento. Em escala muito grande, isso também levaria à mesma evolução acima.
 
 ## Funcionalidades (pipelines de agregação)
 
@@ -48,17 +79,19 @@ O **TelaScore** é uma aplicação de avaliações de **filmes, séries e jogos*
 
 Mostra o top 3 de filmes, séries e jogos pela nota média, considerando apenas títulos com no mínimo 3 avaliações, para que um título com uma única nota alta não lidere o ranking.
 
-Pipeline: `$group` (média e total por título) → `$match` (mínimo de avaliações) → `$lookup` + `$unwind` (nome e tipo do título) → `$sort` (maior média) → `$group` (agrupa por tipo com `$push`) → `$project` com `$slice` (primeiros colocados) → `$sort`.
+Roda na coleção `titulos`, usando a nota média e o total de avaliações já salvos em cada título.
 
-Foco: **dois agrupamentos em sequência**, junção entre coleções e ordenação.
+Pipeline: `$match` (mínimo de avaliações) → `$sort` (maior nota) → `$group` (agrupa por tipo com `$push`) → `$project` com `$slice` (primeiros colocados) → `$sort`.
 
 ### 2. Títulos em alta (`04_titulos_em_alta.js`)
 
 Lista os títulos mais avaliados nos últimos 30 dias e compara com os 30 dias anteriores, indicando se estão subindo, caindo ou estáveis, além da nota média recente.
 
-Pipeline: `$addFields` com `$dateSubtract` e `$$NOW` (início de cada período) → `$match` com `$expr` (últimos 60 dias) → `$addFields` com `$cond` (classifica em período atual ou anterior) → `$group` com somas condicionais → `$match` → `$lookup` + `$unwind` → `$project` com `$subtract` e `$switch` (variação e tendência) → `$sort` → `$limit`.
+Roda na coleção `titulos`, "abrindo" a lista de avaliações de cada título.
 
-Foco: **análise temporal**, com datas calculadas a partir do momento da consulta e contagens condicionais.
+Pipeline: `$match` com `$max` (descarta títulos sem avaliações recentes) → `$unwind` (um documento por avaliação) → `$addFields` com `$dateSubtract` e `$$NOW` (início de cada período) → `$match` com `$expr` (últimos 60 dias) → `$addFields` com `$cond` (período atual ou anterior) → `$group` com `$first` e somas condicionais → `$match` → `$project` com `$subtract` e `$switch` (variação e tendência) → `$sort` → `$limit`.
+
+As duas funcionalidades são diferentes: o ranking trabalha com a **qualidade acumulada** de cada título, sem abrir as avaliações; o "em alta" **abre a lista de avaliações** e analisa o **movimento no tempo**.
 
 ## Camada de cache e estatísticas (Redis)
 
@@ -75,11 +108,13 @@ Além do MongoDB Atlas, o TelaScore usa o **Redis** (com as estruturas probabil�
 ```
 telascore/
 ├── README.md
+├── docs/
+│   └── visao-usuario.png    # visão do usuário (imagem usada neste README)
 ├── package.json             # dependências do Node.js (biblioteca redis)
 ├── package-lock.json        # versões exatas instaladas (gerado pelo npm)
 └── scripts/
     ├── 01_criar_colecoes.js    # cria o banco, as coleções (com validação) e os índices
-    ├── 02_inserir_exemplos.js  # insere documentos de exemplo e calcula a nota média
+    ├── 02_inserir_exemplos.js  # insere usuários, títulos e avaliações embutidas de exemplo
     ├── 03_ranking_por_tipo.js  # funcionalidade 1: ranking dos melhores títulos por tipo
     ├── 04_titulos_em_alta.js   # funcionalidade 2: títulos em alta nos últimos 30 dias
     └── 05_redis_cache_estatisticas.js  # cache de login e estatísticas com Redis
@@ -102,7 +137,7 @@ mongosh "mongodb+srv://ENDERECO_DO_CLUSTER/" --apiVersion 1 --username SEU_USUAR
 
 > As datas das avaliações de exemplo são relativas ao dia da execução do script 02. Para os títulos em alta refletirem os dados de exemplo, execute o script 02 novamente antes do 04 se tiver passado muito tempo.
 
-Resultado esperado do script 02: 6 usuários, 9 títulos (3 filmes, 3 séries e 3 jogos) e 30 avaliações, com a nota média de cada título calculada.
+Resultado esperado do script 02: 6 usuários, 9 títulos (3 filmes, 3 séries e 3 jogos) e 30 avaliações embutidas nos títulos, com a nota média de cada título calculada. O script também testa a regra de uma avaliação por usuário: a segunda avaliação do mesmo usuário no mesmo título é recusada.
 
 ### Como executar o script do Redis
 

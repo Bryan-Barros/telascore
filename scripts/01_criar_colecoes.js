@@ -3,6 +3,7 @@
 const banco = db.getSiblingDB("telascore");
 
 // Remove as coleções antigas, se existirem
+// ("avaliacoes" era uma coleção separada na versão anterior do modelo)
 ["usuarios", "titulos", "avaliacoes"].forEach((nome) => banco.getCollection(nome).drop());
 
 // -------------------------------------------------------------
@@ -26,41 +27,37 @@ banco.createCollection("usuarios", {
 
 // -------------------------------------------------------------
 // Coleção: titulos (filmes, séries e jogos)
-// notaMedia e totalAvaliacoes são desnormalizados para leitura rápida.
+// Cada título guarda a lista das suas avaliações (documentos embutidos).
+// notaMedia e totalAvaliacoes ficam salvos para leitura rápida.
 // -------------------------------------------------------------
 banco.createCollection("titulos", {
   validator: {
     $jsonSchema: {
       bsonType: "object",
-      required: ["nome", "tipo", "ano", "notaMedia", "totalAvaliacoes"],
+      required: ["nome", "tipo", "ano", "notaMedia", "totalAvaliacoes", "avaliacoes"],
       properties: {
         nome:            { bsonType: "string" },
         tipo:            { enum: ["filme", "serie", "jogo"], description: "tipo do título" },
         genero:          { bsonType: "string" },
         ano:             { bsonType: "number", minimum: 1880 },
         notaMedia:       { bsonType: "number", minimum: 0, maximum: 5 },
-        totalAvaliacoes: { bsonType: "number", minimum: 0 }
-      }
-    }
-  }
-});
+        totalAvaliacoes: { bsonType: "number", minimum: 0 },
 
-// -------------------------------------------------------------
-// Coleção: avaliacoes
-// Referencia o título e o usuário pelos seus _id.
-// -------------------------------------------------------------
-banco.createCollection("avaliacoes", {
-  validator: {
-    $jsonSchema: {
-      bsonType: "object",
-      required: ["tituloId", "usuarioId", "apelido", "nota", "data"],
-      properties: {
-        tituloId:   { bsonType: "objectId" },
-        usuarioId:  { bsonType: "objectId" },
-        apelido:    { bsonType: "string", description: "cópia do apelido para exibição" },
-        nota:       { bsonType: "number", minimum: 1, maximum: 5 },
-        comentario: { bsonType: "string", maxLength: 500 },
-        data:       { bsonType: "date" }
+        // Lista de avaliações embutidas no título
+        avaliacoes: {
+          bsonType: "array",
+          items: {
+            bsonType: "object",
+            required: ["usuarioId", "apelido", "nota", "data"],
+            properties: {
+              usuarioId:  { bsonType: "objectId", description: "referência ao usuário que avaliou" },
+              apelido:    { bsonType: "string", description: "cópia do apelido para exibição" },
+              nota:       { bsonType: "number", minimum: 1, maximum: 5 },
+              comentario: { bsonType: "string", maxLength: 500 },
+              data:       { bsonType: "date" }
+            }
+          }
+        }
       }
     }
   }
@@ -75,9 +72,9 @@ banco.usuarios.createIndex({ apelido: 1 }, { unique: true });
 banco.titulos.createIndex({ tipo: 1, notaMedia: -1 }); // ranking por tipo
 banco.titulos.createIndex({ nome: 1 });                // busca por nome
 
-// Um usuário só pode avaliar cada título uma vez
-banco.avaliacoes.createIndex({ tituloId: 1, usuarioId: 1 }, { unique: true });
-banco.avaliacoes.createIndex({ usuarioId: 1 });       // avaliações de um usuário
+// Índice "multikey" (em campo dentro de lista): encontra rápido
+// os títulos avaliados por um usuário ("minhas avaliações")
+banco.titulos.createIndex({ "avaliacoes.usuarioId": 1 });
 
 print("Banco 'telascore' criado com as coleções:");
 printjson(banco.getCollectionNames());
