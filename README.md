@@ -2,7 +2,13 @@
 
 Trabalho prático da disciplina de **Banco de Dados NoSQL**.
 
-**Autores:** Bryan Silva Barros e Pedro Lucas
+**Autores:** Bryan Silva Barros e Pedro Lucas Carvalho Mendes
+
+## Visão do usuário
+
+Exemplo de como o usuário vê um título no TelaScore: nome, gênero, ano, nota média, total de avaliações e as avaliações deixadas por outros usuários.
+
+![Visão do usuário no TelaScore](docs/visao-usuario.png)
 
 ## Descrição do sistema
 
