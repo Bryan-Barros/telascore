@@ -18,6 +18,7 @@ O **TelaScore** é uma aplicação de avaliações de **filmes, séries e jogos*
 
 - **MongoDB Atlas:** banco principal, com os dados permanentes (banco `telascore`).
 - **Redis Cloud:** cache de login e estatísticas de uso, em memória.
+- **Neo4j AuraDB:** grafo de usuários e títulos, para recomendações e feed.
 
 ### Coleções
 
@@ -82,6 +83,33 @@ Pipeline: `$match` → `$unwind` → `$addFields` → `$match` → `$addFields` 
 
 ![Resultado da execução do script do Redis](docs/redis-resultado.png)
 
+## Grafo (Neo4j)
+
+O grafo representa as conexões entre usuários e títulos, usadas para **recomendação** e **feed**. Do usuário, guarda apenas o apelido.
+
+| Tipo | Elemento | Propriedades |
+|---|---|---|
+| Vértice | `Usuario` | `apelido` |
+| Vértice | `Titulo` | `nome`, `tipo`, `ano` |
+| Relacionamento | `(Usuario)-[:AVALIOU]->(Titulo)` | `nota`, `data` |
+| Relacionamento | `(Usuario)-[:SEGUE]->(Usuario)` | — |
+
+O grafo tem 15 vértices (6 usuários e 9 títulos) e 38 relacionamentos (30 avaliações e 8 conexões de "segue"):
+
+![Grafo completo no Neo4j](docs/neo4j-grafo.png)
+
+### Consultas
+
+**Recomendação** ("quem gostou do que você gostou, também gostou de..."): parte do usuário, chega aos títulos que ele avaliou com nota 4 ou 5, encontra outros usuários que também gostaram desses títulos e recomenda os títulos que eles gostaram e que o usuário ainda não avaliou.
+
+![Resultado da recomendação no Neo4j](docs/neo4j-recomendacao.png)
+
+![Caminhos da recomendação no grafo](docs/neo4j-recomendacao-grafo.png)
+
+**Feed:** mostra as avaliações mais recentes dos usuários que a pessoa segue.
+
+![Resultado do feed no Neo4j](docs/neo4j-feed.png)
+
 ## Estrutura do repositório
 
 ```
@@ -95,7 +123,9 @@ telascore/
     ├── 02_inserir_exemplos.js         # insere usuários, títulos e avaliações de exemplo
     ├── 03_ranking_por_tipo.js         # funcionalidade 1
     ├── 04_titulos_em_alta.js          # funcionalidade 2
-    └── 05_redis_cache_estatisticas.js # cache de login e estatísticas com Redis
+    ├── 05_redis_cache_estatisticas.js # cache de login e estatísticas com Redis
+    ├── 06_neo4j_grafo.cypher          # cria o grafo no Neo4j
+    └── 07_neo4j_consultas.cypher      # consultas de recomendação e feed no Neo4j
 ```
 
 ## Como executar
@@ -115,3 +145,5 @@ npm install
 $env:REDIS_URI = "redis://default:SUA_SENHA@ENDERECO_DO_REDIS:PORTA"
 node scripts/05_redis_cache_estatisticas.js
 ```
+
+**Neo4j** (requer uma instância no Neo4j AuraDB): na ferramenta **Query** do AuraDB, execute o conteúdo de `scripts/06_neo4j_grafo.cypher` para criar o grafo e, depois, cada consulta de `scripts/07_neo4j_consultas.cypher`, uma por vez.
